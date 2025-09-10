@@ -21,7 +21,15 @@ end
 local extension = jit.os == "Windows" and "dll" or jit.os == "Linux" and "so" or jit.os == "OSX" and "dylib"
 package.cpath = string.format("%s;%s/?.%s", package.cpath, libsDirectory, extension)
 
+require("thirdparty.autobatch")
 local imgui = require("thirdparty.cimgui")
+local json = require("thirdparty.json") --- @type thirdparty.Json
+local nativefs = require("thirdparty.nativefs") --- @type thirdparty.NativeFS
+
+local conductor = require("conductor"):new() --- @type Conductor
+conductor.autoIncrement = false
+
+local endStep = 4
 
 local curEngine = 1
 local curEngineList = {
@@ -31,22 +39,39 @@ local curEngineList = {
     "Psych Engine (1.x)",
     "Troll Engine (1.x)",
     "Codename Engine",
-    "Friday Again Garfie Baby" -- hey guys it's me! sword!
+    "Friday Again Garfie Baby", -- hey guys it's me! sword!
+}
+local engineShorthands = {
+    ["FNF Legacy"] = "fnflegacy",
+    ["FNF V-Slice"] = "fnfvslice",
+    ["Psych Engine (pre-1.x)"] = "psych",
+    ["Psych Engine (1.x)"] = "psych1x",
+    ["Troll Engine (1.x)"] = "troll1x",
+    ["Codename Engine"] = "codename",
+    ["Friday Again Garfie Baby"] = "garfiebaby",
 }
 local metaRequiredFormats = {
     ["FNF V-Slice"] = true,
     ["Codename Engine"] = true,
-    ["Friday Again Garfie Baby"] = true
+    ["Friday Again Garfie Baby"] = true,
+}
+local dynamicStrumlineFormats = {
+    ["Codename Engine"] = true,
 }
 local difficultySeparatedFormats = {
     ["FNF Legacy"] = true,
     ["Psych Engine (pre-1.x)"] = true,
     ["Psych Engine (1.x)"] = true,
     ["Troll Engine (1.x)"] = true,
-    ["Codename Engine"] = true
+    ["Codename Engine"] = true,
 }
-local selectEngineActivePtr = ffi.new("bool[1]", false)
+local selectEngineActivePtr = ffi.new("bool[1]", true)
 local curEnginePtr = ffi.new("int[1]", curEngine)
+
+local currentChart = nil
+
+local inst = nil --- @type love.Source
+local vocals = {} --- @type table<string, love.Source>
 
 local shortcutActions = {
     open = function()
@@ -54,6 +79,23 @@ local shortcutActions = {
     end,
     exit = function()
         love.event.quit(0)
+    end,
+    playPause = function()
+        if not conductor.music then
+            return
+        end
+        if conductor.music:isPlaying() then
+            conductor.music:pause()
+            for _, track in pairs(vocals) do
+                track:pause()
+            end
+        else
+            conductor.music:play()
+            for _, track in pairs(vocals) do
+                track:seek(conductor.music:tell("seconds"), "seconds")
+                track:play()
+            end
+        end
     end
 }
 local snaps = {
@@ -85,11 +127,89 @@ local settings = {
 -- 11th would be null byte, so should actually be 10 characters max
 local playbackRateBuffer = ffi.new("char[11]", "1")
 local playbackRatePtr = ffi.new("float[1]", 1)
+local musicTimePtr = ffi.new("float[1]", 0)
+
+local gfx = love.graphics
+local img = love.image
+
+local bgDesat = gfx.newImage("res/images/bg_desat.png", {linear = true})
+
+local gridCellSize = 80
+local halfGridCellSize = gridCellSize / 2
+
+local lineWidth = 2
+local gridImageData = img.newImageData((gridCellSize * 4.5) + (lineWidth * 2), gridCellSize * 10)
+for x = 1, gridImageData:getWidth() do
+    for y = 1, gridImageData:getHeight() do
+        local color = {248 / 255, 248 / 255, 248 / 255, 1}
+        if math.floor((((x - lineWidth) + (math.floor((y % gridCellSize) / halfGridCellSize) * halfGridCellSize)) % gridCellSize) / halfGridCellSize) == 0 then
+            color = {217 / 255, 217 / 255, 217 / 255, 1}
+        end
+        if x <= (lineWidth + 1) or (x >= (gridImageData:getWidth() - lineWidth)) or (x >= (gridImageData:getWidth() - halfGridCellSize - (lineWidth / 2) - 1) and x <= (gridImageData:getWidth() - halfGridCellSize + (lineWidth / 2) - 1)) or (x >= (gridCellSize * 2) - (lineWidth / 2) and x <= (gridCellSize * 2) + (lineWidth / 2)) then
+            color = {170 / 255, 170 / 255, 170 / 255, 1}
+        end
+        gridImageData:setPixel(x - 1, y - 1, color)
+    end
+end
+local gridImage = gfx.newImage(gridImageData)
+gridImageData:release()
+
+function formatTime(seconds)
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor((seconds % 3600) / 60)
+    local secs = seconds % 60
+
+    if hours > 0 then
+        return string.format("%d:%02d:%02d", hours, minutes, secs)
+    end
+    return string.format("%d:%02d", minutes, secs)
+end
+
+local function isUIFocused()
+    return imgui.love.GetWantCaptureKeyboard() or imgui.love.GetWantCaptureMouse()
+end
+
+local audioFilters = {}
+audioFilters["OGG Vorbis (*.ogg)"] = "ogg"
+audioFilters["WAV (*.wav)"] = "wav"
+audioFilters["MP3 (*.mp3)"] = "mp3"
+
+--- @param path string
+--- @param type "stream"|"static"
+--- @return love.Source, string
+local function loadExternalSource(path, type)
+    path = path:replace("\\", "/")
+    local dir = string.sub(path, 1, string.lastIndexOf(path, "/"))
+    if not nativefs.mount(dir, "__nativefs__temp__") then
+        return nil, "Could not mount " .. dir
+    end
+    local item = string.sub(path, string.lastIndexOf(path, "/") + 1)
+    local source = love.audio.newSource("__nativefs__temp__/" .. item, type)
+    nativefs.unmount(dir)
+    if source then
+        return source, nil
+    end
+    return nil, nil
+end
 
 love.load = function()
     love.keyboard.setKeyRepeat(true)
     love.keyboard.setTextInput(true)
     imgui.love.Init()
+end
+
+local scrollY = 0
+love.update = function(dt)
+    conductor:update(dt)
+    scrollY = conductor.curDecStep * halfGridCellSize
+
+    imgui.love.Update(dt)
+    imgui.NewFrame()
+
+    musicTimePtr[0] = conductor.music and conductor.music:tell("seconds") or 0.0
+end
+
+local function setupChart(charts)
 end
 
 local renderingItem = false
@@ -156,10 +276,15 @@ local leftSidedItems = {
         if imgui.MenuItem_Bool("Mute instrumental") then
         end
         imgui.Separator()
-        -- TODO: actually get vocal tracks somehow
-        if imgui.MenuItem_Bool("Mute Vocals.ogg") then
+        local trackCount = 0
+        for name, _ in pairs(vocals) do
+            if imgui.MenuItem_Bool("Mute " .. name) then
+            end
+            trackCount = trackCount + 1
         end
-        imgui.Separator()
+        if trackCount ~= 0 then
+            imgui.Separator()
+        end
         if imgui.MenuItem_Bool("Mute all vocal tracks") then
         end
     end},
@@ -206,6 +331,7 @@ local rightSidedItems = {
     tostring(snaps[curSnap]) .. "x",
     {"Playback >", function()
         if imgui.MenuItem_Bool("Play/Pause", "Space") then
+            playPauseShortcut.action()
         end
         imgui.Separator()
         if imgui.MenuItem_Bool("Go back a beat", "Up") then
@@ -258,12 +384,21 @@ local rightSidedItems = {
         return width
     end
 }
+local playbarIcons = {
+    ["start"] = love.graphics.newImage("res/images/playbar/start.png"),
+    ["backward"] = love.graphics.newImage("res/images/playbar/backward.png"),
+    ["pause"] = love.graphics.newImage("res/images/playbar/pause.png"),
+    ["play"] = love.graphics.newImage("res/images/playbar/play.png"),
+    ["forward"] = love.graphics.newImage("res/images/playbar/forward.png"),
+    ["end"] = love.graphics.newImage("res/images/playbar/end.png"),
+}
 love.draw = function()
     -- menu bar
     if imgui.BeginMainMenuBar() then
         -- shortcuts
         openShortcut = imgui.love.Shortcut({"ctrl"}, "o", shortcutActions.open)
         exitShortcut = imgui.love.Shortcut({"ctrl"}, "q", shortcutActions.exit)
+        playPauseShortcut = imgui.love.Shortcut(nil, "space", shortcutActions.playPause)
 
         -- left sided items
         for i = 1, #leftSidedItems do
@@ -291,7 +426,7 @@ love.draw = function()
                 menuWidth = menuWidth + (imgui.CalcTextSize(type(item) == "table" and item[1] or (type(item) == "function" and (tostring(itemRet) or tostring(item)) or tostring(item))).x + (imgui.GetStyle().ItemSpacing.x * 2))
             end
         end
-        imgui.SameLine(imgui.GetWindowWidth() - (menuWidth + 8))
+        imgui.SameLine(imgui.GetWindowWidth() - (menuWidth + 12))
         renderingItem = true
         for i = 1, #rightSidedItems do
             local item = rightSidedItems[i]
@@ -310,53 +445,195 @@ love.draw = function()
     end
     -- open dialog window
     if selectEngineActivePtr[0] then
+        local viewport = imgui.GetMainViewport()
+        
+        -- viewport.GetCenter() isn't an actual function i can call, so i have to calculate
+        -- the center myself, no big deal though
+        local center = imgui.ImVec2_Float(viewport.WorkPos.x + (viewport.WorkSize.x / 2), viewport.WorkPos.y + (viewport.WorkSize.y / 2))
+        imgui.SetNextWindowPos(center, imgui.ImGuiCond_Appearing, imgui.ImVec2_Float(0.5, 0.5))
+
         if imgui.Begin("Select an engine to use", selectEngineActivePtr, bit.bor(imgui.ImGuiWindowFlags_AlwaysAutoResize, imgui.ImGuiWindowFlags_NoResize)) then
+            imgui.Text("Select an engine to make a chart for from the list below:")
+            -- TODO: allow for dynamic strumline counts
+            if dynamicStrumlineFormats[curEngineList[curEngine]] then
+                imgui.Text("NOTE: Dynamic strumlines aren't supported!")
+            end
             for i = 1, #curEngineList do
                 if imgui.RadioButton_IntPtr(curEngineList[i], curEnginePtr, i) then
                     curEngine = curEnginePtr[0] -- it's this one bro
                 end
             end
+            imgui.SetCursorPosX(imgui.GetContentRegionAvail().x - (imgui.CalcTextSize("OK").x + imgui.CalcTextSize("Cancel").x + (imgui.GetStyle().ItemSpacing.x * 2)))
+
             if imgui.Button("OK") then
                 -- we confirming it
                 selectEngineActivePtr[0] = false
+                
+                local function selectVocalTracks(metaPath, chartPaths, instPath)
+                    love.window.showFileDialog("openfile", function(vocalPaths)
+                        local format = require("formats." .. engineShorthands[curEngineList[curEngine]])
 
-                local function selectChart()
+                        -- load inst
+                        if inst then
+                            inst:release()
+                        end
+                        inst = loadExternalSource(instPath, "stream")
+                        conductor.music = inst
+
+                        -- load vocals
+                        for _, track in pairs(vocals) do
+                            track:release()
+                        end
+                        vocals = {}
+                        for _, path in ipairs(vocalPaths) do
+                            local item = string.sub(path:replace("\\", "/"), string.lastIndexOf(path, "/") + 1)
+                            vocals[item] = loadExternalSource(path, "stream")
+                        end
+
+                        -- load chart(s)
+                        local sharts = {}
+                        for _, path in ipairs(chartPaths) do
+                            table.insert(sharts, format.parse(path, metaPath))
+                        end
+                        setupChart(sharts)
+                    end, {title = "Select some vocal tracks (cancel to skip)", multiselect = true, defaultname = "Voices.ogg", filters = audioFilters})
+                end
+                local function selectInst(metaPath, chartPaths)
                     love.window.showFileDialog("openfile", function(files)
                         if #files == 0 then
+                            selectEngineActivePtr[0] = true
                             return
                         end
-                    end, {title = difficultySeparatedFormats[curEngineList[curEngine]] and "Select a chart file for each difficulty" or "Select a chart file", multiselect = true, defaultname = "chart.json", filters = {["Funkin' Chart JSON (*.json)"] = ".json"}})
+                        selectVocalTracks(metaPath, chartPaths, files[1])
+                    end, {title = "Select an instrumental", defaultname = "Inst.ogg", filters = audioFilters})
+                end
+                local function selectChart(metaPath)
+                    love.window.showFileDialog("openfile", function(files)
+                        if #files == 0 then
+                            selectEngineActivePtr[0] = true
+                            return
+                        end
+                        selectInst(metaPath, files)
+                    end, {title = difficultySeparatedFormats[curEngineList[curEngine]] and "Select a chart file for each difficulty" or "Select a chart file", multiselect = difficultySeparatedFormats[curEngineList[curEngine]], defaultname = "chart.json", filters = {["Funkin' Chart JSON (*.json)"] = "json"}})
                 end
                 if metaRequiredFormats[curEngineList[curEngine]] then
                     love.window.showFileDialog("openfile", function(files)
                         if #files == 0 then
+                            selectEngineActivePtr[0] = true
                             return
                         end
-                        -- do this last!
-                        selectChart()
-                    end, {title = "Select a chart metadata file", defaultname = "metadata.json", filters = {["Funkin' Chart Metadata JSON (*.json)"] = ".json"}})
+                        selectChart(files[1])
+                    end, {title = "Select a chart metadata file", defaultname = "metadata.json", filters = {["Funkin' Chart Metadata JSON (*.json)"] = "json"}})
                 else
-                    selectChart()
+                    selectChart(nil)
                 end
             end
             imgui.SameLine()
             if imgui.Button("Cancel") then
                 selectEngineActivePtr[0] = false
             end
-            imgui.End()
         end
+        imgui.End()
     end
+    -- conductor stats
+    imgui.SetNextWindowPos(imgui.ImVec2_Float(5, 720 - 135))
+    imgui.SetNextWindowSize(imgui.ImVec2_Float(100, 65))
+    imgui.PushStyleColor_Vec4(imgui.ImGuiCol_WindowBg, imgui.ImVec4_Float(36.0 / 255.0, 36.0 / 255.0, 36.0 / 255.0, 1.0))
+    
+    if imgui.Begin("Conductor Stats", nil, bit.bor(imgui.ImGuiWindowFlags_NoTitleBar, imgui.ImGuiWindowFlags_NoResize, imgui.ImGuiWindowFlags_NoMove)) then
+        imgui.Text("Step: " .. conductor.curStep)
+        imgui.Text("Beat: " .. conductor.curBeat)
+        imgui.Text("Measure: " .. conductor.curMeasure)
+        imgui.End()
+    end
+    
+    -- playbar
+    imgui.SetNextWindowPos(imgui.ImVec2_Float(0, 720 - 65))
+    imgui.SetNextWindowSize(imgui.ImVec2_Float(gfx.getWidth(), 65))
 
+    if imgui.Begin("Playbar", nil, bit.bor(imgui.ImGuiWindowFlags_NoTitleBar, imgui.ImGuiWindowFlags_NoResize, imgui.ImGuiWindowFlags_NoMove)) then
+        -- imgui.Button("cum")
+        local curTimeString = formatTime(conductor:getCurrentTime() / 1000.0)
+        imgui.SetCursorPosX(((gfx.getWidth() - 400) / 2) - (imgui.CalcTextSize(curTimeString).x + 15))
+        imgui.SetCursorPosY(imgui.GetCursorPosY() + 2)
+        imgui.Text(curTimeString)
+
+        local songLengthString = formatTime(conductor.music and conductor.music:getDuration("seconds") or 0.0)
+        imgui.SameLine()
+        imgui.SetCursorPosX(((gfx.getWidth() - 400) / 2) + 415)
+        imgui.Text(songLengthString)
+        
+        local musicLength = conductor.music and conductor.music:getDuration("seconds") or 0.0
+        imgui.SameLine()
+        imgui.SetNextItemWidth(400)
+        imgui.SetCursorPosY(imgui.GetCursorPosY() - 2)
+        imgui.SetCursorPosX((gfx.getWidth() - 400) / 2)
+
+        if imgui.SliderFloat("##TimeSlider", musicTimePtr, 0, musicLength, "") then
+            if conductor.music then
+                conductor.music:seek(musicTimePtr[0], "seconds")
+            end
+            for _, track in pairs(vocals) do
+                track:seek(musicTimePtr[0], "seconds")
+            end
+            conductor:setCurrentRawTime(musicTimePtr[0] * 1000.0)
+        end
+        local buttonAreaWidth = ((15 + (imgui.GetStyle().ItemSpacing.x * 2)) * 5)
+        imgui.SetCursorPosX((gfx.getWidth() - buttonAreaWidth) / 2)
+        imgui.SetCursorPosY(imgui.GetCursorPosY() + 3)
+
+        imgui.ImageButton("##Start", imgui.love.TextureRef(playbarIcons["start"]), imgui.ImVec2_Float(15, 15))
+        imgui.SameLine()
+        imgui.ImageButton("##Backward", imgui.love.TextureRef(playbarIcons["backward"]), imgui.ImVec2_Float(15, 15))
+        imgui.SameLine()
+        imgui.ImageButton("##PlayPause", imgui.love.TextureRef(playbarIcons["play"]), imgui.ImVec2_Float(15, 15))
+        imgui.SameLine()
+        imgui.ImageButton("##Forward", imgui.love.TextureRef(playbarIcons["forward"]), imgui.ImVec2_Float(15, 15))
+        imgui.SameLine()
+        imgui.ImageButton("##End", imgui.love.TextureRef(playbarIcons["end"]), imgui.ImVec2_Float(15, 15))
+
+        local difficultyString = "Normal"
+        imgui.SetCursorPosX(gfx.getWidth() - (imgui.CalcTextSize(difficultyString).x + (imgui.GetStyle().ItemSpacing.x * 2)))
+        imgui.SetCursorPosY(imgui.GetCursorPosY() - 22)
+        imgui.Button(difficultyString)
+        
+        imgui.End()
+    end
+    imgui.PopStyleColor(1)
+
+    -- render our own stuff just before imgui
+    -- bg
+    gfx.setColor(100 / 255, 57 / 255, 180 / 255, 1)
+    gfx.draw(bgDesat, (gfx.getWidth() - bgDesat:getWidth()) / 2, 0)
+    gfx.setColor(1, 1, 1, 1) -- restore to default coloring
+    
+    -- grid
+    local gridScrollX = ((love.graphics.getWidth() - gridImage:getWidth()) / 2)
+    local gridScrollY = ((love.graphics.getHeight() - gridImage:getHeight()) / 2) - (scrollY % gridImage:getHeight())
+    local gridScrollYNoWrap = ((love.graphics.getHeight() - gridImage:getHeight()) / 2) - scrollY
+    
+    gfx.draw(gridImage, gridScrollX, gridScrollY)
+    gfx.draw(gridImage, gridScrollX, gridScrollY + gridImage:getHeight())
+    
+    gfx.setColor(0, 0, 0, 0.25)
+
+    -- top area (indicating notes can't be placed before the song)
+    gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) - (gridCellSize * 4) - 1, gridImage:getWidth(), (gridCellSize * 4))
+    gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) - 4, gridImage:getWidth(), 3)
+
+    -- bottom area (indicating notes can't be placed after the song)
+    gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) + (endStep * halfGridCellSize) - 1, gridImage:getWidth(), (gridCellSize * 5))
+    gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) + (endStep * halfGridCellSize) - 1, gridImage:getWidth(), 3)
+
+    gfx.setColor(1, 1, 1, 1) -- restore to default coloring
+    
     -- code to render imgui
     imgui.Render()
     imgui.love.RenderDrawLists()
 
-    love.graphics.print(tostring(love.timer.getFPS()) .. " FPS", 10, 720 - 25)
-end
-
-love.update = function(dt)
-    imgui.love.Update(dt)
-    imgui.NewFrame()
+    local font = love.graphics.getFont()
+    local str = tostring(love.timer.getFPS()) .. " FPS"
+    gfx.print(str, (gfx.getWidth() - font:getWidth(str) - 5), 720 - 85)
 end
 
 love.mousemoved = function(x, y, ...)
@@ -403,7 +680,7 @@ end
 
 love.textinput = function(t)
     imgui.love.TextInput(t)
-    if imgui.love.GetWantCaptureKeyboard() then
+    if not imgui.love.GetWantCaptureKeyboard() then
         -- your code here 
     end
 end
