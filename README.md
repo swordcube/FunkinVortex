@@ -12,6 +12,7 @@ FunkinVortex is currently *very* unfinished, so the supported engines list won't
   - Troll Engine (1.x)
 - FNF V-Slice
 - Codename
+- Friday Again Garfie Baby
 
 ## Want another engine to be added?
 Open an issue about it on [GitHub](https://github.com/swordcube/FunkinVortex), or if you want to, make a pull request!
