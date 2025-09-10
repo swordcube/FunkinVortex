@@ -1,3 +1,7 @@
+-- TODO: this code is an absolute mess i NEED to clean it up when i can
+-- this actually sucks
+-- ...mostly because i've never used imgui before and i wanted to get something working quick
+
 require("tools.mathtools")
 require("tools.stringtools")
 require("tools.tabletools")
