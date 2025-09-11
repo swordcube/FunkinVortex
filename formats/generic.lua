@@ -1,19 +1,29 @@
 local format = {}
 
 function format.createTemplate()
-    return {
+    local chart = {
         notes = {},
         events = {},
-        
-        meta = {
+    }
+    local meta = {
+        song = {
             title = "N/A",
             artist = "N/A",
-            charter = "N/A"
-        },
-        song = {
+            charter = "N/A",
+
+            difficulties = {"easy", "normal", "hard"},
             timingPoints = {}
+        },
+        game = {
+            scrollSpeed = {},
+            characters = {
+                opponent = "dad",
+                player = "bf",
+                spectator = "gf"
+            }
         }
     }
+    return chart, meta
 end
 
 return format

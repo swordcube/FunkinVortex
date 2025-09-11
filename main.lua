@@ -25,6 +25,7 @@ require("thirdparty.autobatch")
 local imgui = require("thirdparty.cimgui")
 local json = require("thirdparty.json") --- @type thirdparty.Json
 local nativefs = require("thirdparty.nativefs") --- @type thirdparty.NativeFS
+local native = require("thirdparty.native") --- @type thirdparty.Native
 
 local conductor = require("conductor"):new() --- @type Conductor
 conductor.autoIncrement = false
@@ -168,11 +169,11 @@ end
 local function isUIFocused()
     return imgui.love.GetWantCaptureKeyboard() or imgui.love.GetWantCaptureMouse()
 end
-
-local audioFilters = {}
-audioFilters["OGG Vorbis (*.ogg)"] = "ogg"
-audioFilters["WAV (*.wav)"] = "wav"
-audioFilters["MP3 (*.mp3)"] = "mp3"
+local audioFilters = {
+    {"OGG Vorbis (*.ogg)", "ogg"},
+    {"WAV (*.wav)", "wav"},
+    {"MP3 (*.mp3)", "mp3"}
+}
 
 --- @param path string
 --- @param type "stream"|"static"
@@ -200,6 +201,13 @@ end
 
 local scrollY = 0
 love.update = function(dt)
+    if conductor.music then
+        conductor.music:setPitch(playbackRatePtr[0])
+    end
+    for _, track in pairs(vocals) do
+        track:setPitch(playbackRatePtr[0])
+    end
+    conductor.rate = playbackRatePtr[0]
     conductor:update(dt)
     scrollY = conductor.curDecStep * halfGridCellSize
 
@@ -392,6 +400,13 @@ local playbarIcons = {
     ["forward"] = love.graphics.newImage("res/images/playbar/forward.png"),
     ["end"] = love.graphics.newImage("res/images/playbar/end.png"),
 }
+love.handlers.handlecustomfiledialog = function()
+    local data = native.eventCallbackStorage[1]
+    if data and data.f then
+        data.f(table.unpack(data.args))
+    end
+    table.remove(native.eventCallbackStorage, 1)
+end
 love.draw = function()
     -- menu bar
     if imgui.BeginMainMenuBar() then
@@ -470,7 +485,7 @@ love.draw = function()
                 selectEngineActivePtr[0] = false
                 
                 local function selectVocalTracks(metaPath, chartPaths, instPath)
-                    love.window.showFileDialog("openfile", function(vocalPaths)
+                    native.showFileDialog("openfile", function(vocalPaths)
                         local format = require("formats." .. engineShorthands[curEngineList[curEngine]])
 
                         -- load inst
@@ -493,13 +508,19 @@ love.draw = function()
                         -- load chart(s)
                         local sharts = {}
                         for _, path in ipairs(chartPaths) do
-                            table.insert(sharts, format.parse(path, metaPath))
+                            local chart, meta = format.parse(path, metaPath)
+                            chart.meta = meta
+
+                            local item = string.sub(path:replace("\\", "/"), string.lastIndexOf(path, "/") + 1)
+                            item = string.sub(item, 1, string.lastIndexOf(item, ".") - 1)
+                            print(item)
+                            table.insert(sharts, chart)
                         end
                         setupChart(sharts)
                     end, {title = "Select some vocal tracks (cancel to skip)", multiselect = true, defaultname = "Voices.ogg", filters = audioFilters})
                 end
                 local function selectInst(metaPath, chartPaths)
-                    love.window.showFileDialog("openfile", function(files)
+                    native.showFileDialog("openfile", function(files)
                         if #files == 0 then
                             selectEngineActivePtr[0] = true
                             return
@@ -508,22 +529,22 @@ love.draw = function()
                     end, {title = "Select an instrumental", defaultname = "Inst.ogg", filters = audioFilters})
                 end
                 local function selectChart(metaPath)
-                    love.window.showFileDialog("openfile", function(files)
+                    native.showFileDialog("openfile", function(files)
                         if #files == 0 then
                             selectEngineActivePtr[0] = true
                             return
                         end
                         selectInst(metaPath, files)
-                    end, {title = difficultySeparatedFormats[curEngineList[curEngine]] and "Select a chart file for each difficulty" or "Select a chart file", multiselect = difficultySeparatedFormats[curEngineList[curEngine]], defaultname = "chart.json", filters = {["Funkin' Chart JSON (*.json)"] = "json"}})
+                    end, {title = difficultySeparatedFormats[curEngineList[curEngine]] and "Select a chart file for each difficulty" or "Select a chart file", multiselect = difficultySeparatedFormats[curEngineList[curEngine]], defaultname = "chart.json", filters = {{"Funkin' Chart JSON (*.json)", "json"}}})
                 end
                 if metaRequiredFormats[curEngineList[curEngine]] then
-                    love.window.showFileDialog("openfile", function(files)
+                    native.showFileDialog("openfile", function(files)
                         if #files == 0 then
                             selectEngineActivePtr[0] = true
                             return
                         end
                         selectChart(files[1])
-                    end, {title = "Select a chart metadata file", defaultname = "metadata.json", filters = {["Funkin' Chart Metadata JSON (*.json)"] = "json"}})
+                    end, {title = "Select a chart metadata file", defaultname = "metadata.json", filters = {{"Funkin' Chart Metadata JSON (*.json)", "json"}}})
                 else
                     selectChart(nil)
                 end
