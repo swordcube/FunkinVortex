@@ -15,7 +15,7 @@ if love.filesystem.isFused() and love.filesystem.mountFullPath then
     if not sourceBaseDir then
         sourceBaseDir = love.filesystem.getSourceBaseDirectory()
     end
-    libsDirectory = sourceBaseDir .. "/libs"
+    libsDirectory = sourceBaseDir
     love.filesystem.mountFullPath(sourceBaseDir, "")
 end
 local extension = jit.os == "Windows" and "dll" or jit.os == "Linux" and "so" or jit.os == "OSX" and "dylib"
