@@ -140,21 +140,21 @@ function Native.showFileDialog(type, callback, settings)
 	elseif type == "savefile" then
 		sdltype = 2
 	end
-	local props = ffi.C.SDL_CreateProperties()
+	local props = SDL3.SDL_CreateProperties()
 	if not isempty(settings.title) then
-		ffi.C.SDL_SetStringProperty(props, "SDL.filedialog.title", settings.title)
+		SDL3.SDL_SetStringProperty(props, "SDL.filedialog.title", settings.title)
 	end
 	if not isempty(settings.acceptlabel) then
-		ffi.C.SDL_SetStringProperty(props, "SDL.filedialog.accept", settings.acceptlabel)
+		SDL3.SDL_SetStringProperty(props, "SDL.filedialog.accept", settings.acceptlabel)
 	end
 	if not isempty(settings.cancellabel) then
-		ffi.C.SDL_SetStringProperty(props, "SDL.filedialog.cancel", settings.cancellabel)
+		SDL3.SDL_SetStringProperty(props, "SDL.filedialog.cancel", settings.cancellabel)
 	end
 	if not isempty(settings.defaultname) then
-		ffi.C.SDL_SetStringProperty(props, "SDL.filedialog.location", settings.defaultname)
+		SDL3.SDL_SetStringProperty(props, "SDL.filedialog.location", settings.defaultname)
 	end
 	if settings.attachtowindow then
-		ffi.C.SDL_SetBoolProperty(props, "SDL.filedialog.window", ffi.C.SDL_GL_GetCurrentWindow())
+		SDL3.SDL_SetBoolProperty(props, "SDL.filedialog.window", SDL3.SDL_GL_GetCurrentWindow())
 	end
 	if settings.filters and #settings.filters ~= 0 then
 		local data = ffi.new("SDL_DialogFileFilter[" .. #settings.filters .. "]")
@@ -164,13 +164,13 @@ function Native.showFileDialog(type, callback, settings)
 			f.pattern = settings.filters[i][2]
 			data[i - 1] = f
 		end
-		ffi.C.SDL_SetPointerProperty(props, "SDL.filedialog.filters", data)
-		ffi.C.SDL_SetNumberProperty(props, "SDL.filedialog.nfilters", #settings.filters)
+		SDL3.SDL_SetPointerProperty(props, "SDL.filedialog.filters", data)
+		SDL3.SDL_SetNumberProperty(props, "SDL.filedialog.nfilters", #settings.filters)
 	end
 	if settings.multiselect then
-		ffi.C.SDL_SetBooleanProperty(props, "SDL.filedialog.many", 1)
+		SDL3.SDL_SetBooleanProperty(props, "SDL.filedialog.many", 1)
 	end
-	ffi.C.SDL_ShowFileDialogWithProperties(sdltype, ffi.cast("SDL_DialogFileCallback", function(userdata, filelist, filter)
+	SDL3.SDL_ShowFileDialogWithProperties(sdltype, ffi.cast("SDL_DialogFileCallback", function(userdata, filelist, filter)
 		local files = {}
 		local err = nil
 
@@ -181,14 +181,14 @@ function Native.showFileDialog(type, callback, settings)
 				i = i + 1
 			end
 		else
-			err = ffi.string(ffi.C.SDL_GetError())
+			err = ffi.string(SDL3.SDL_GetError())
 		end
 		table.insert(Native.eventCallbackStorage, {
 			f = callback,
 			args = {files, settings.filters[filter + 1], err}
 		})
 		love.event.push("handlecustomfiledialog")
-		ffi.C.SDL_DestroyProperties(props)
+		SDL3.SDL_DestroyProperties(props)
 	end), nil, props)
 end
 function Native.setCursor(type) end
