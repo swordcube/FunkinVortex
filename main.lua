@@ -220,14 +220,18 @@ love.update = function(dt)
     end
     conductor.rate = playbackRatePtr[0]
     conductor:update(dt)
-    scrollY = conductor.curDecStep * halfGridCellSize
 
+    if conductor.music and conductor.music:isPlaying() then
+        scrollY = conductor.curDecStep * halfGridCellSize
+    else
+        scrollY = math.lerp(scrollY, conductor.curDecStep * halfGridCellSize, dt * 19.2)
+    end
     notecontainer:update(dt)
 
     imgui.love.Update(dt)
     imgui.NewFrame()
 
-    musicTimePtr[0] = conductor.music and conductor.music:tell("seconds") or 0.0
+    musicTimePtr[0] = conductor:getCurrentRawTime() / 1000.0
 end
 
 local function setupChart(chart)
@@ -661,6 +665,7 @@ love.draw = function()
                 track:seek(musicTimePtr[0], "seconds")
             end
             conductor:setCurrentRawTime(musicTimePtr[0] * 1000.0)
+            conductor:update(0)
         end
         local buttonAreaWidth = ((15 + (imgui.GetStyle().ItemSpacing.x * 2)) * 5)
         imgui.SetCursorPosX((gfx.getWidth() - buttonAreaWidth) / 2)
@@ -752,7 +757,7 @@ love.draw = function()
 
     -- visual playhead bar thing
     gfx.setColor(189 / 255, 2 / 255, 49 / 255, 1)
-    gfx.rectangle("fill", gridScrollX, (gridCenterY + (gridCellSize * 4)) - 5, gridImage:getWidth(), 3)
+    gfx.rectangle("fill", gridScrollX, (gridCenterY + (gridCellSize * 4)) - 7, gridImage:getWidth(), 5)
     gfx.setColor(1, 1, 1, 1) -- restore to default coloring
     
     -- code to render imgui
@@ -788,7 +793,18 @@ end
 love.wheelmoved = function(x, y)
     imgui.love.WheelMoved(x, y)
     if not imgui.love.GetWantCaptureMouse() then
-        -- your code here 
+        if conductor.music and not conductor.music:isPlaying() then
+            local time = conductor:getTimeAtBeat(conductor.curBeat - (y > 0 and 1 or -1))
+            time = math.clamp(time, 0.0, conductor.music:getDuration("seconds") * 1000.0)
+            
+            conductor.music:seek(time / 1000.0, "seconds")
+            conductor:setCurrentRawTime(time)
+            conductor:update(0)
+
+            for _, track in pairs(vocals) do
+                track:seek(time / 1000.0, "seconds")
+            end
+        end
     end
 end
 

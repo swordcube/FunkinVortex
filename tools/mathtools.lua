@@ -28,6 +28,9 @@ math.halfpi = math.pi / 2
 -- The value of *π * 2*.
 math.pi2 = math.pi * 2
 
+-- A number used to account for floating-point inaccuracies.
+math.epsilon = 0.0000001
+
 ---
 --- Returns if a number is NaN.
 ---
