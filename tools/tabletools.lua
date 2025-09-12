@@ -198,5 +198,9 @@ end
 --- @param item  any    The item to remove from the table.
 ---
 function table.removeItem(t, item)
-	_table.remove(t, _table.indexOf(t, item))
+    local index = _table.indexOf(t, item)
+    if index == -1 then
+        error("Item to remove not found in table")
+    end
+	_table.remove(t, index)
 end

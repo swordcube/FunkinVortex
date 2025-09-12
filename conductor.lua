@@ -1,7 +1,8 @@
-local Class = require("middleclass")
+local Class = require("thirdparty.middleclass") --- @type thirdparty.MiddleClass
 
 --- @class Conductor
 local Conductor = Class("Conductor")
+Conductor.static.instance = nil --- @type Conductor
 
 function Conductor:__init__()
     self.offset = 0.0

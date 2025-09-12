@@ -27,8 +27,12 @@ local json = require("thirdparty.json") --- @type thirdparty.Json
 local nativefs = require("thirdparty.nativefs") --- @type thirdparty.NativeFS
 local native = require("thirdparty.native") --- @type thirdparty.Native
 
-local conductor = require("conductor"):new() --- @type Conductor
+local conductorcl = require("conductor")
+local conductor = conductorcl:new() --- @type Conductor
 conductor.autoIncrement = false
+conductorcl.instance = conductor
+
+local notecontainer = require("containers.notecontainer"):new() --- @type containers.notecontainer
 
 local endStep = 4
 
@@ -70,6 +74,8 @@ local selectEngineActivePtr = ffi.new("bool[1]", true)
 local curEnginePtr = ffi.new("int[1]", curEngine)
 
 local currentChart = nil
+local storedCharts = {}
+local currentDifficulty = "normal"
 
 local inst = nil --- @type love.Source
 local vocals = {} --- @type table<string, love.Source>
@@ -166,7 +172,7 @@ function formatTime(seconds)
     return string.format("%d:%02d", minutes, secs)
 end
 
-local function isUIFocused()
+function isUIFocused()
     return imgui.love.GetWantCaptureKeyboard() or imgui.love.GetWantCaptureMouse()
 end
 local audioFilters = {
@@ -204,12 +210,19 @@ love.update = function(dt)
     if conductor.music then
         conductor.music:setPitch(playbackRatePtr[0])
     end
-    for _, track in pairs(vocals) do
+    for name, track in pairs(vocals) do
+        local diff = track:tell("seconds") - inst:tell("seconds")
+        if math.abs(diff) >= 0.03 then
+            print("Resyncing " .. name .. " to " .. math.truncate(inst:tell("seconds") * 1000.0, 3) .. "ms, was " .. math.truncate(diff * 1000.0, 3) .. "ms offset")
+            track:seek(inst:tell("seconds"), "seconds")
+        end
         track:setPitch(playbackRatePtr[0])
     end
     conductor.rate = playbackRatePtr[0]
     conductor:update(dt)
     scrollY = conductor.curDecStep * halfGridCellSize
+
+    notecontainer:update(dt)
 
     imgui.love.Update(dt)
     imgui.NewFrame()
@@ -217,7 +230,14 @@ love.update = function(dt)
     musicTimePtr[0] = conductor.music and conductor.music:tell("seconds") or 0.0
 end
 
-local function setupChart(charts)
+local function setupChart(chart)
+    currentChart = chart
+
+    conductor:reset(currentChart.meta.song.timingPoints[1].bpm, currentChart.meta.song.timingPoints[1].timeSignature)
+    conductor:setupTimingPoints(currentChart.meta.song.timingPoints)
+
+    notecontainer.notes = currentChart.notes[currentDifficulty]
+    endStep = conductor:getStepAtTime(inst:getDuration("seconds") * 1000.0)
 end
 
 local renderingItem = false
@@ -501,22 +521,65 @@ love.draw = function()
                         end
                         vocals = {}
                         for _, path in ipairs(vocalPaths) do
-                            local item = string.sub(path:replace("\\", "/"), string.lastIndexOf(path, "/") + 1)
+                            path = path:replace("\\", "/")
+                            
+                            local item = string.sub(path, string.lastIndexOf(path, "/") + 1)
                             vocals[item] = loadExternalSource(path, "stream")
                         end
 
                         -- load chart(s)
-                        local sharts = {}
+                        -- try to guess each difficulty (defaults to normal)
+                        local guessedDifficulties = {}
+                        local allChartDifficulties = {}
                         for _, path in ipairs(chartPaths) do
-                            local chart, meta = format.parse(path, metaPath)
-                            chart.meta = meta
+                            path = path:replace("\\", "/")
 
-                            local item = string.sub(path:replace("\\", "/"), string.lastIndexOf(path, "/") + 1)
+                            local item = string.sub(path, string.lastIndexOf(path, "/") + 1)
                             item = string.sub(item, 1, string.lastIndexOf(item, ".") - 1)
-                            print(item)
-                            table.insert(sharts, chart)
+                            
+                            local split = item:split("-")
+                            if #split < 2 then
+                                split = {"normal"}
+                            end
+                            allChartDifficulties[path] = split[#split]
+                            table.insert(guessedDifficulties, split[#split])
                         end
-                        setupChart(sharts)
+                        -- re-order the difficulties to easy, normal, hard, then any other extras after
+                        if table.contains(guessedDifficulties, "hard") then
+                            table.removeItem(guessedDifficulties, "hard")
+                            table.insert(guessedDifficulties, 1, "hard")
+                        end
+                        if table.contains(guessedDifficulties, "normal") then
+                            table.removeItem(guessedDifficulties, "normal")
+                            table.insert(guessedDifficulties, 1, "normal")
+                        end
+                        if table.contains(guessedDifficulties, "easy") then
+                            table.removeItem(guessedDifficulties, "easy")
+                            table.insert(guessedDifficulties, 1, "easy")
+                        end
+                        -- parse each chart
+                        local sharts = {}
+                        local shartsByDifficulty = {}
+                        for _, path in ipairs(chartPaths) do
+                            path = path:replace("\\", "/")
+
+                            -- guessedDifficulties will most likely go unused for
+                            -- chart formats that have metadata files, as they usually specify difficulties themselves!
+                            local chart, meta = format.parse(path, metaPath, guessedDifficulties, allChartDifficulties[path])
+                            chart.meta = meta
+                            table.insert(sharts, chart)
+                            shartsByDifficulty[allChartDifficulties[path]] = chart
+                        end
+                        storedCharts = sharts
+
+                        local diffs = sharts[1].meta.song.difficulties
+                        currentDifficulty = #diffs > 1 and diffs[2] or diffs[1] -- try to pick normal, if not pick easy
+
+                        local shartIndex = table.indexOf(sharts, shartsByDifficulty[currentDifficulty])
+                        if shartIndex == -1 then
+                            shartIndex = 1
+                        end
+                        setupChart(sharts[shartIndex])
                     end, {title = "Select some vocal tracks (cancel to skip)", multiselect = true, defaultname = "Voices.ogg", filters = audioFilters})
                 end
                 local function selectInst(metaPath, chartPaths)
@@ -557,7 +620,7 @@ love.draw = function()
         imgui.End()
     end
     -- conductor stats
-    imgui.SetNextWindowPos(imgui.ImVec2_Float(5, 720 - 135))
+    imgui.SetNextWindowPos(imgui.ImVec2_Float(5, gfx.getHeight() - 135))
     imgui.SetNextWindowSize(imgui.ImVec2_Float(100, 65))
     imgui.PushStyleColor_Vec4(imgui.ImGuiCol_WindowBg, imgui.ImVec4_Float(36.0 / 255.0, 36.0 / 255.0, 36.0 / 255.0, 1.0))
     
@@ -569,7 +632,7 @@ love.draw = function()
     end
     
     -- playbar
-    imgui.SetNextWindowPos(imgui.ImVec2_Float(0, 720 - 65))
+    imgui.SetNextWindowPos(imgui.ImVec2_Float(0, gfx.getHeight() - 65))
     imgui.SetNextWindowSize(imgui.ImVec2_Float(gfx.getWidth(), 65))
 
     if imgui.Begin("Playbar", nil, bit.bor(imgui.ImGuiWindowFlags_NoTitleBar, imgui.ImGuiWindowFlags_NoResize, imgui.ImGuiWindowFlags_NoMove)) then
@@ -613,7 +676,7 @@ love.draw = function()
         imgui.SameLine()
         imgui.ImageButton("##End", imgui.love.TextureRef(playbarIcons["end"]), imgui.ImVec2_Float(15, 15))
 
-        local difficultyString = "Normal"
+        local difficultyString = string.title(currentDifficulty)
         imgui.SetCursorPosX(gfx.getWidth() - (imgui.CalcTextSize(difficultyString).x + (imgui.GetStyle().ItemSpacing.x * 2)))
         imgui.SetCursorPosY(imgui.GetCursorPosY() - 22)
         imgui.Button(difficultyString)
@@ -624,28 +687,72 @@ love.draw = function()
 
     -- render our own stuff just before imgui
     -- bg
+    local bgScaleX = math.max(gfx.getWidth() / 1280, 1)
+    local bgScaleY = math.max(gfx.getHeight() / 720, 1)
+
+    local bgScale = (bgScaleY > bgScaleX) and bgScaleY or bgScaleX
+
     gfx.setColor(100 / 255, 57 / 255, 180 / 255, 1)
-    gfx.draw(bgDesat, (gfx.getWidth() - bgDesat:getWidth()) / 2, 0)
+    gfx.draw(bgDesat, (gfx.getWidth() - (bgDesat:getWidth() * bgScale)) / 2, (gfx.getHeight() - (bgDesat:getHeight() * bgScale)) / 2, 0, bgScale)
     gfx.setColor(1, 1, 1, 1) -- restore to default coloring
     
     -- grid
+    local gridCenterY = ((love.graphics.getHeight() - gridImage:getHeight()) / 2) + 35
     local gridScrollX = ((love.graphics.getWidth() - gridImage:getWidth()) / 2)
-    local gridScrollY = ((love.graphics.getHeight() - gridImage:getHeight()) / 2) - (scrollY % gridImage:getHeight())
-    local gridScrollYNoWrap = ((love.graphics.getHeight() - gridImage:getHeight()) / 2) - scrollY
+    local gridScrollY = gridCenterY - (scrollY % gridImage:getHeight())
+    local gridScrollYNoWrap = gridCenterY - scrollY
     
+    local repeatCount = math.ceil(gfx.getHeight() / 720)
+    for i = 1, repeatCount do
+        gfx.draw(gridImage, gridScrollX, gridScrollY - (gridImage:getHeight() * i))
+        gfx.draw(gridImage, gridScrollX, gridScrollY + (gridImage:getHeight() * i))
+    end
     gfx.draw(gridImage, gridScrollX, gridScrollY)
-    gfx.draw(gridImage, gridScrollX, gridScrollY + gridImage:getHeight())
     
-    gfx.setColor(0, 0, 0, 0.25)
+    -- beat & measure separators
+    local curBeat = conductor.curBeat - 16
+    local endBeat = conductor.curBeat + 16
+    
+    local curMeasure = conductor.curMeasure - 16
+    local endMeasure = conductor.curMeasure + 16
+
+    while curBeat < endBeat do
+        local beatTime = conductor:getTimeAtBeat(curBeat)
+
+        local posY = halfGridCellSize * conductor:getStepAtTime(beatTime)
+        gfx.setColor(170 / 255, 170 / 255, 170 / 255, 1)
+        gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) + posY - 4, gridImage:getWidth(), 3)
+        
+        curBeat = curBeat + 1
+    end
+    while curMeasure < endMeasure do
+        local measureTime = conductor:getTimeAtMeasure(curMeasure)
+        
+        local posY = halfGridCellSize * conductor:getStepAtTime(measureTime)
+        gfx.setColor(100 / 255, 100 / 255, 100 / 255, 1)
+        gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) + posY - 6, gridImage:getWidth(), 5)
+
+        curMeasure = curMeasure + 1
+    end
 
     -- top area (indicating notes can't be placed before the song)
-    gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) - (gridCellSize * 4) - 1, gridImage:getWidth(), (gridCellSize * 4))
+    gfx.setColor(0, 0, 0, 0.25)
+
+    local coverHeight = gridCellSize * (gfx.getHeight() / 180)
+    gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) - coverHeight - 1, gridImage:getWidth(), coverHeight)
     gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) - 4, gridImage:getWidth(), 3)
 
     -- bottom area (indicating notes can't be placed after the song)
-    gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) + (endStep * halfGridCellSize) - 1, gridImage:getWidth(), (gridCellSize * 5))
+    gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) + (endStep * halfGridCellSize) - 1, gridImage:getWidth(), coverHeight)
     gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) + (endStep * halfGridCellSize) - 1, gridImage:getWidth(), 3)
+    gfx.setColor(1, 1, 1, 1) -- restore to default coloring
+    
+    -- notes & events
+    notecontainer:draw(gridScrollX, gridScrollYNoWrap + (gridCellSize * 4))
 
+    -- visual playhead bar thing
+    gfx.setColor(189 / 255, 2 / 255, 49 / 255, 1)
+    gfx.rectangle("fill", gridScrollX, (gridCenterY + (gridCellSize * 4)) - 5, gridImage:getWidth(), 3)
     gfx.setColor(1, 1, 1, 1) -- restore to default coloring
     
     -- code to render imgui
@@ -654,7 +761,7 @@ love.draw = function()
 
     local font = love.graphics.getFont()
     local str = tostring(love.timer.getFPS()) .. " FPS"
-    gfx.print(str, (gfx.getWidth() - font:getWidth(str) - 5), 720 - 85)
+    gfx.print(str, (gfx.getWidth() - font:getWidth(str) - 5), gfx.getHeight() - 85)
 end
 
 love.mousemoved = function(x, y, ...)

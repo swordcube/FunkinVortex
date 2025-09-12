@@ -5,7 +5,7 @@ local nativefs = require("thirdparty.nativefs") --- @type thirdparty.NativeFS
 
 local format = {}
 
-function format.parse(chartPath, _)
+function format.parse(chartPath, _, guessedDifficulties, currentDifficulty)
     local json = json.parse(nativefs.read("string", chartPath)).song
     local chart, meta = generic.createTemplate()
 
@@ -21,6 +21,11 @@ function format.parse(chartPath, _)
             timeSignature = {4, lengthInSteps / 4}
         }
     }
+    meta.song.difficulties = guessedDifficulties
+
+    for i = 1, #guessedDifficulties do
+        chart.notes[guessedDifficulties[i]] = {}
+    end
     for i = 1, #json.notes do
         local section = json.notes[i]
         table.insert(chart.events, {
@@ -34,7 +39,7 @@ function format.parse(chartPath, _)
             if section.mustHitSection then
                 lane = (note[2] + 4) % 8 --- 0-3 = player, 4-7 = opponent
             end
-            table.insert(chart.notes, {
+            table.insert(chart.notes[currentDifficulty], {
                 time = note[1],
                 lane = lane,
                 length = note[3],
@@ -60,7 +65,7 @@ function format.parse(chartPath, _)
             })
         end
     end
-    table.sort(chart.notes, function(a, b)
+    table.sort(chart.notes[currentDifficulty], function(a, b)
         if a.time ~= b.time then
             return a.time < b.time
         end
@@ -69,6 +74,7 @@ function format.parse(chartPath, _)
     table.sort(meta.song.timingPoints, function(a, b)
         return a.time < b.time
     end)
+    -- print(#chart.notes[currentDifficulty])
     return chart, meta
 end
 
