@@ -115,6 +115,41 @@ local function skipMeasures(amt)
         track:seek(time / 1000.0, "seconds")
     end
 end
+local volume = 0.5
+local muted = false
+
+local volumeSFXRaw = {
+    up = love.audio.newSource("res/sfx/volume/up.ogg", "static"),
+    down = love.audio.newSource("res/sfx/volume/down.ogg", "static"),
+    max = love.audio.newSource("res/sfx/volume/max.ogg", "static")
+}
+local volumeSFXClones = {}
+for key, value in pairs(volumeSFXRaw) do
+    local clones = {}
+    for _ = 1, 10 do
+        table.insert(clones, value:clone())
+    end
+    volumeSFXClones[key] = clones
+end
+local volumeSFX = setmetatable({}, {__index = function(_, k)
+    local sfx = volumeSFXClones[k][1] --- @type love.Source
+    table.remove(volumeSFXClones[k], 1)
+    table.insert(volumeSFXClones[k], sfx)
+    return sfx
+end})
+
+local volumeTimer = 0.0
+local volumeAlpha = 0.0
+
+local function applyVolume()
+    volumeTimer = 0.0
+    volumeAlpha = 1.0
+    love.audio.setVolume(volume * (muted and 0.0 or 1.0))
+end
+applyVolume()
+volumeTimer = 1.0
+volumeAlpha = 0.0
+
 local shortcutActions = {
     open = function()
         selectEngineActivePtr[0] = true
@@ -181,6 +216,25 @@ local shortcutActions = {
             conductor:setCurrentRawTime(conductor.music:getDuration("seconds") * 1000.0)
             conductor:update(0)
         end
+    end,
+    volumeDown = function()
+        volume = math.clamp(volume - 0.1, 0.0, 1.0)
+        applyVolume()
+        volumeSFX.down:play()
+    end,
+    volumeUp = function()
+        volume = math.clamp(volume + 0.1, 0.0, 1.0)
+        applyVolume()
+        if volume >= 1.0 then
+            volumeSFX.max:play()
+        else
+            volumeSFX.up:play()
+        end
+    end,
+    volumeMute = function()
+        muted = not muted
+        applyVolume()
+        volumeSFX.up:play()
     end
 }
 local snaps = {
@@ -290,6 +344,14 @@ end
 
 local scrollY = 0
 love.update = function(dt)
+    volumeTimer = volumeTimer + dt
+    if volumeTimer >= 1.0 then
+        volumeTimer = 1.0
+        volumeAlpha = volumeAlpha - (dt * 2.0)
+        if volumeAlpha <= 0.0 then
+            volumeAlpha = 0.0
+        end
+    end
     if conductor.music then
         conductor.music:setPitch(playbackRatePtr[0])
     end
@@ -516,6 +578,11 @@ love.handlers.handlecustomfiledialog = function()
     table.remove(native.eventCallbackStorage, 1)
 end
 love.draw = function()
+    -- volume shortcuts
+    volumeDownShortcut = imgui.love.Shortcut(nil, "-", shortcutActions.volumeDown, true, true)
+    volumeUpShortcut = imgui.love.Shortcut(nil, "=", shortcutActions.volumeUp, true, true)
+    volumeMuteShotcut = imgui.love.Shortcut(nil, "0", shortcutActions.volumeMute, true, true)
+
     -- menu bar
     if imgui.BeginMainMenuBar() then
         -- shortcuts
@@ -780,16 +847,25 @@ love.draw = function()
         imgui.SetCursorPosX((gfx.getWidth() - buttonAreaWidth) / 2)
         imgui.SetCursorPosY(imgui.GetCursorPosY() + 3)
 
-        imgui.ImageButton("##Start", imgui.love.TextureRef(playbarIcons["start"]), imgui.ImVec2_Float(15, 15))
+        if imgui.ImageButton("##Start", imgui.love.TextureRef(playbarIcons["start"]), imgui.ImVec2_Float(15, 15)) then
+            goBackToTheStartShortcut.action()
+        end
         imgui.SameLine()
-        imgui.ImageButton("##Backward", imgui.love.TextureRef(playbarIcons["backward"]), imgui.ImVec2_Float(15, 15))
+        if imgui.ImageButton("##Backward", imgui.love.TextureRef(playbarIcons["backward"]), imgui.ImVec2_Float(15, 15)) then
+            skipMeasures(-1)
+        end
         imgui.SameLine()
-        imgui.ImageButton("##PlayPause", imgui.love.TextureRef(playbarIcons["play"]), imgui.ImVec2_Float(15, 15))
+        if imgui.ImageButton("##PlayPause", imgui.love.TextureRef((conductor.music and conductor.music:isPlaying()) and playbarIcons["pause"] or playbarIcons["play"]), imgui.ImVec2_Float(15, 15)) then
+            playPauseShortcut.action()
+        end
         imgui.SameLine()
-        imgui.ImageButton("##Forward", imgui.love.TextureRef(playbarIcons["forward"]), imgui.ImVec2_Float(15, 15))
+        if imgui.ImageButton("##Forward", imgui.love.TextureRef(playbarIcons["forward"]), imgui.ImVec2_Float(15, 15)) then
+            skipMeasures(1)
+        end
         imgui.SameLine()
-        imgui.ImageButton("##End", imgui.love.TextureRef(playbarIcons["end"]), imgui.ImVec2_Float(15, 15))
-
+        if imgui.ImageButton("##End", imgui.love.TextureRef(playbarIcons["end"]), imgui.ImVec2_Float(15, 15)) then
+            goToTheEndShortcut.action()
+        end
         local difficultyString = string.title(currentDifficulty)
         imgui.SetCursorPosX(gfx.getWidth() - (imgui.CalcTextSize(difficultyString).x + (imgui.GetStyle().ItemSpacing.x * 2)))
         imgui.SetCursorPosY(imgui.GetCursorPosY() - 22)
@@ -896,6 +972,23 @@ love.draw = function()
     gfx.setColor(189 / 255, 2 / 255, 49 / 255, 1)
     gfx.rectangle("fill", gridScrollX, (gridCenterY + (gridCellSize * 4)) - 7, gridImage:getWidth(), 5)
     gfx.setColor(1, 1, 1, 1) -- restore to default coloring
+
+    -- volume tray
+    if volumeAlpha > 0 then
+        local width, height = 200, 25
+        local posX, posY = ((gfx.getWidth() - width) / 2), 30
+        gfx.setColor(36.0 / 255, 36.0 / 255, 36.0 / 255, volumeAlpha)
+        gfx.rectangle("fill", posX, posY, width, height)
+
+        gfx.setColor(1, 1, 1, volumeAlpha * (muted and 0.1 or 0.25))
+        gfx.rectangle("fill", posX + 10, posY + 10, width - 20, height - 20)
+
+        if not muted then
+            gfx.setColor(1, 1, 1, volumeAlpha)
+            gfx.rectangle("fill", posX + 10, posY + 10, (width - 20) * volume, height - 20)
+        end
+        gfx.setColor(1, 1, 1, 1) -- restore to default coloring
+    end
     
     -- code to render imgui
     imgui.Render()
