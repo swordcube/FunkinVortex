@@ -16,6 +16,8 @@ function notecontainer:__init__()
 
     self.beginIndex = 1
     self.endIndex = 1
+
+    self.hitsound = love.audio.newSource("res/sfx/hitsound_tump.ogg", "static")
 end
 
 function notecontainer:update(dt)
@@ -53,6 +55,18 @@ function notecontainer:draw(offsetX, offsetY)
         local posX = (note.lane * 40) + (mainFrame.offsetX * (40 / mainFrame.width))
         local posY = (c:getStepAtTime(note.time) * 40) + (mainFrame.offsetY * (40 / mainFrame.height))
         
+        local pr, pg, pb, pa = gfx.getColor()
+
+        local prevWasHit = note.wasHit or false
+        note.wasHit = c:getCurrentPlayhead() >= note.time and not ((not c.music or not c.music:isPlaying()) and c:getCurrentPlayhead() <= note.time)
+        
+        local canPlaySFX = (note.lane < 4 and settings.playOpponentHitsounds) or (note.lane > 3 and settings.playPlayerHitsounds)
+        if canPlaySFX and c.music and c.music:isPlaying() and note.wasHit and note.wasHit ~= prevWasHit then
+            self.hitsound:seek(0, "seconds")
+            self.hitsound:play()
+        end
+        gfx.setColor(1, 1, 1, note.wasHit and 0.45 or 1)
+        
         if note.length > 0 then
             local holdFrame = self.atlas.frames[dirs[(note.lane % 4) + 1] .. " hold"][1]
             local tailFrame = self.atlas.frames[dirs[(note.lane % 4) + 1] .. " tail"][1]
@@ -60,6 +74,7 @@ function notecontainer:draw(offsetX, offsetY)
             gfx.draw(self.atlas.img, tailFrame.quad, posX + (((mainFrame.width * scaleX) - (tailFrame.width * scaleX)) / 2) + offsetX, posY + ((mainFrame.height * scaleY) / 2) + ((note.length - tailFrame.height) * scaleY) + offsetY, 0, scaleX, scaleY)
         end
         gfx.draw(self.atlas.img, mainFrame.quad, posX + offsetX, posY + offsetY, 0, scaleX, scaleY)
+        gfx.setColor(pr, pg, pb, pa)
     end
 end
 

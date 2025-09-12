@@ -36,6 +36,8 @@ function Conductor:__init__()
     --- @protected
     self._lastPlayhead = 0.0
 
+    self.metronome = love.audio.newSource("res/sfx/metronome.ogg", "static")
+
     self:reset(100)
 end
 
@@ -302,8 +304,20 @@ function Conductor:update(dt)
     self.curDecBeat = self:getBeatAtTime(t, curTimingPoint)
     self.curBeat = math.floor(self.curDecBeat)
     
+    if self.hasMetronome and self.curBeat > lastBeat then
+        self.metronome:setPitch(math.floor(self.curDecBeat - curTimingPoint.beat) % curTimingPoint.timeSignature[1] == 0 and 1.5 or 1.12)
+        self.metronome:seek(0, "seconds")
+        self.metronome:play()
+    end
     self.curDecMeasure = self:getMeasureAtTime(t, curTimingPoint)
     self.curMeasure = math.floor(self.curDecMeasure)
+end
+
+function Conductor:destroy()
+    if self.metronome then
+        self.metronome:release()
+        self.metronome = nil
+    end
 end
 
 return Conductor

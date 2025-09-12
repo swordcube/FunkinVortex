@@ -30,6 +30,7 @@ local native = require("thirdparty.native") --- @type thirdparty.Native
 local conductorcl = require("conductor")
 local conductor = conductorcl:new() --- @type Conductor
 conductor.autoIncrement = false
+conductor.hasMetronome = false
 conductorcl.instance = conductor
 
 local notecontainer = require("containers.notecontainer"):new() --- @type containers.notecontainer
@@ -55,6 +56,16 @@ local engineShorthands = {
     ["Codename Engine"] = "codename",
     ["Friday Again Garfie Baby"] = "garfiebaby",
 }
+local engineFormatParsers = {}
+for longName, value in pairs(engineShorthands) do
+    local success, result = pcall(require, "formats." .. value)
+    if success then
+        engineFormatParsers[longName] = result
+    end
+end
+engineFormatParsers = setmetatable(engineFormatParsers, {__index = function(t, k)
+    error(k .. " isn't implemented yet!", 0)
+end})
 local metaRequiredFormats = {
     ["FNF V-Slice"] = true,
     ["Codename Engine"] = true,
@@ -80,6 +91,30 @@ local currentDifficulty = "normal"
 local inst = nil --- @type love.Source
 local vocals = {} --- @type table<string, love.Source>
 
+local function skipBeats(amt)
+    local time = conductor:getTimeAtBeat(conductor.curBeat + amt)
+    time = math.clamp(time, 0.0, conductor.music:getDuration("seconds") * 1000.0)
+    
+    conductor.music:seek(time / 1000.0, "seconds")
+    conductor:setCurrentRawTime(time)
+    conductor:update(0)
+
+    for _, track in pairs(vocals) do
+        track:seek(time / 1000.0, "seconds")
+    end
+end
+local function skipMeasures(amt)
+    local time = conductor:getTimeAtMeasure(conductor.curMeasure + amt)
+    time = math.clamp(time, 0.0, conductor.music:getDuration("seconds") * 1000.0)
+    
+    conductor.music:seek(time / 1000.0, "seconds")
+    conductor:setCurrentRawTime(time)
+    conductor:update(0)
+
+    for _, track in pairs(vocals) do
+        track:seek(time / 1000.0, "seconds")
+    end
+end
 local shortcutActions = {
     open = function()
         selectEngineActivePtr[0] = true
@@ -90,6 +125,9 @@ local shortcutActions = {
     playPause = function()
         if not conductor.music then
             return
+        end
+        if conductor:getCurrentRawTime() >= (conductor.music:getDuration("seconds") * 1000.0) - math.epsilon then
+            conductor.music:seek(0.0, "seconds")
         end
         if conductor.music:isPlaying() then
             conductor.music:pause()
@@ -102,6 +140,46 @@ local shortcutActions = {
                 track:seek(conductor.music:tell("seconds"), "seconds")
                 track:play()
             end
+        end
+    end,
+    goBackABeat = function()
+        if conductor.music and not conductor.music:isPlaying() then
+            skipBeats(-1)
+        end
+    end,
+    goForwardABeat = function()
+        if conductor.music and not conductor.music:isPlaying() then
+            skipBeats(1)
+        end
+    end,
+    goBackAMeasure = function()
+        if conductor.music and not conductor.music:isPlaying() then
+            skipMeasures(-1)
+        end
+    end,
+    goForwardAMeasure = function()
+        if conductor.music and not conductor.music:isPlaying() then
+            skipMeasures(1)
+        end
+    end,
+    goBackToTheStart = function()
+        if conductor.music and not conductor.music:isPlaying() then
+            conductor.music:seek(0, "seconds")
+            for _, track in pairs(vocals) do
+                track:seek(0, "seconds")
+            end
+            conductor:setCurrentRawTime(0)
+            conductor:update(0)
+        end
+    end,
+    goToTheEnd = function()
+        if conductor.music and not conductor.music:isPlaying() then
+            conductor.music:seek(conductor.music:getDuration("seconds"), "seconds")
+            for _, track in pairs(vocals) do
+                track:seek(conductor.music:getDuration("seconds"), "seconds")
+            end
+            conductor:setCurrentRawTime(conductor.music:getDuration("seconds") * 1000.0)
+            conductor:update(0)
         end
     end
 }
@@ -124,7 +202,7 @@ local noteTypes = {
 }
 local curNoteType = 1
 
-local settings = {
+settings = {
     playOpponentHitsounds = true,
     playPlayerHitsounds = true,
 
@@ -136,6 +214,11 @@ local playbackRateBuffer = ffi.new("char[11]", "1")
 local playbackRatePtr = ffi.new("float[1]", 1)
 local musicTimePtr = ffi.new("float[1]", 0)
 
+local errorPopupActivePtr = ffi.new("bool[1]", false)
+local errorPopupMsg = ""
+
+local wasSelectingEngine = false
+
 local gfx = love.graphics
 local img = love.image
 
@@ -145,14 +228,14 @@ local gridCellSize = 80
 local halfGridCellSize = gridCellSize / 2
 
 local lineWidth = 2
-local gridImageData = img.newImageData((gridCellSize * 4.5) + (lineWidth * 2), gridCellSize * 10)
+local gridImageData = img.newImageData((gridCellSize * 4) + (lineWidth * 2), gridCellSize * 10)
 for x = 1, gridImageData:getWidth() do
     for y = 1, gridImageData:getHeight() do
         local color = {248 / 255, 248 / 255, 248 / 255, 1}
         if math.floor((((x - lineWidth) + (math.floor((y % gridCellSize) / halfGridCellSize) * halfGridCellSize)) % gridCellSize) / halfGridCellSize) == 0 then
             color = {217 / 255, 217 / 255, 217 / 255, 1}
         end
-        if x <= (lineWidth + 1) or (x >= (gridImageData:getWidth() - lineWidth)) or (x >= (gridImageData:getWidth() - halfGridCellSize - (lineWidth / 2) - 1) and x <= (gridImageData:getWidth() - halfGridCellSize + (lineWidth / 2) - 1)) or (x >= (gridCellSize * 2) - (lineWidth / 2) and x <= (gridCellSize * 2) + (lineWidth / 2)) then
+        if x <= (lineWidth + 1) or (x >= (gridImageData:getWidth() - lineWidth)) or (x >= (gridCellSize * 2) - (lineWidth / 2) and x <= (gridCellSize * 2) + (lineWidth / 2)) then
             color = {170 / 255, 170 / 255, 170 / 255, 1}
         end
         gridImageData:setPixel(x - 1, y - 1, color)
@@ -385,6 +468,7 @@ local rightSidedItems = {
         imgui.Separator()
         if imgui.MenuItem_Bool("Metronome", nil, settings.metronome) then
             settings.metronome = not settings.metronome
+            conductor.hasMetronome = settings.metronome
         end
         if imgui.MenuItem_Bool("Visual metronome", nil, settings.visualMetronome) then
             settings.visualMetronome = not settings.visualMetronome
@@ -437,7 +521,16 @@ love.draw = function()
         -- shortcuts
         openShortcut = imgui.love.Shortcut({"ctrl"}, "o", shortcutActions.open)
         exitShortcut = imgui.love.Shortcut({"ctrl"}, "q", shortcutActions.exit)
+
+        goBackToTheStartShortcut = imgui.love.Shortcut(nil, "home", shortcutActions.goBackToTheStart)
+        goToTheEndShortcut = imgui.love.Shortcut(nil, "end", shortcutActions.goToTheEnd)
+
         playPauseShortcut = imgui.love.Shortcut(nil, "space", shortcutActions.playPause)
+        goBackABeatShortcut = imgui.love.Shortcut(nil, "up", shortcutActions.goBackABeat)
+        goForwardABeatShortcut = imgui.love.Shortcut(nil, "down", shortcutActions.goForwardABeat)
+
+        goBackAMeasureShortcut = imgui.love.Shortcut(nil, "a", shortcutActions.goBackAMeasure)
+        goForwardAMeasureShortcut = imgui.love.Shortcut(nil, "d", shortcutActions.goForwardAMeasure)
 
         -- left sided items
         for i = 1, #leftSidedItems do
@@ -484,14 +577,21 @@ love.draw = function()
     end
     -- open dialog window
     if selectEngineActivePtr[0] then
+        if conductor.music and conductor.music:isPlaying() then
+            playPauseShortcut.action()
+        end
         local viewport = imgui.GetMainViewport()
+        imgui.PushStyleColor_Vec4(imgui.ImGuiCol_ModalWindowDimBg, imgui.ImVec4_Float(0, 0, 0, 0.6))
+        
+        local title = "Select an engine to use"
+        imgui.OpenPopup_Str(title)
         
         -- viewport.GetCenter() isn't an actual function i can call, so i have to calculate
         -- the center myself, no big deal though
         local center = imgui.ImVec2_Float(viewport.WorkPos.x + (viewport.WorkSize.x / 2), viewport.WorkPos.y + (viewport.WorkSize.y / 2))
         imgui.SetNextWindowPos(center, imgui.ImGuiCond_Appearing, imgui.ImVec2_Float(0.5, 0.5))
-
-        if imgui.Begin("Select an engine to use", selectEngineActivePtr, bit.bor(imgui.ImGuiWindowFlags_AlwaysAutoResize, imgui.ImGuiWindowFlags_NoResize)) then
+        
+        if imgui.BeginPopupModal("Select an engine to use", selectEngineActivePtr, bit.bor(imgui.ImGuiWindowFlags_AlwaysAutoResize, imgui.ImGuiWindowFlags_NoResize)) then
             imgui.Text("Select an engine to make a chart for from the list below:")
             -- TODO: allow for dynamic strumline counts
             if dynamicStrumlineFormats[curEngineList[curEngine]] then
@@ -508,9 +608,16 @@ love.draw = function()
                 -- we confirming it
                 selectEngineActivePtr[0] = false
                 
+                local success, result = pcall(function() return engineFormatParsers[curEngineList[curEngine]] end)
+                if not success then
+                    wasSelectingEngine = true
+                    errorPopupActivePtr[0] = true
+                    errorPopupMsg = result
+                    goto endOfEngineSelection
+                end
                 local function selectVocalTracks(metaPath, chartPaths, instPath)
                     native.showFileDialog("openfile", function(vocalPaths)
-                        local format = require("formats." .. engineShorthands[curEngineList[curEngine]])
+                        local format = engineFormatParsers[curEngineList[curEngine]]
 
                         -- load inst
                         if inst then
@@ -620,8 +727,10 @@ love.draw = function()
             if imgui.Button("Cancel") then
                 selectEngineActivePtr[0] = false
             end
+            ::endOfEngineSelection::
+            imgui.EndPopup()
         end
-        imgui.End()
+        imgui.PopStyleColor(1)
     end
     -- conductor stats
     imgui.SetNextWindowPos(imgui.ImVec2_Float(5, gfx.getHeight() - 135))
@@ -690,11 +799,39 @@ love.draw = function()
     end
     imgui.PopStyleColor(1)
 
+    if errorPopupActivePtr[0] == true then
+        imgui.PushStyleColor_Vec4(imgui.ImGuiCol_ModalWindowDimBg, imgui.ImVec4_Float(0, 0, 0, 0.6))
+
+        local title = "Hey! Listen!"
+        imgui.OpenPopup_Str(title)
+
+        local viewport = imgui.GetMainViewport()
+        
+        -- viewport.GetCenter() isn't an actual function i can call, so i have to calculate
+        -- the center myself, no big deal though
+        local center = imgui.ImVec2_Float(viewport.WorkPos.x + (viewport.WorkSize.x / 2), viewport.WorkPos.y + (viewport.WorkSize.y / 2))
+        imgui.SetNextWindowSize(imgui.ImVec2_Float(-1, -1), imgui.ImGuiCond_Always)
+        imgui.SetNextWindowPos(center, imgui.ImGuiCond_Appearing, imgui.ImVec2_Float(0.5, 0.5))
+
+        if imgui.BeginPopupModal(title, errorPopupActivePtr) then
+            imgui.Text(errorPopupMsg)
+            imgui.SetCursorPosX(imgui.GetContentRegionAvail().x - imgui.CalcTextSize("OK").x)
+            if imgui.Button("OK") then
+                if wasSelectingEngine then
+                    selectEngineActivePtr[0] = true
+                end
+                wasSelectingEngine = false
+                errorPopupActivePtr[0] = false
+            end
+            imgui.EndPopup()
+        end
+        imgui.PopStyleColor(1)
+    end
+
     -- render our own stuff just before imgui
     -- bg
     local bgScaleX = math.max(gfx.getWidth() / 1280, 1)
     local bgScaleY = math.max(gfx.getHeight() / 720, 1)
-
     local bgScale = (bgScaleY > bgScaleX) and bgScaleY or bgScaleX
 
     gfx.setColor(100 / 255, 57 / 255, 180 / 255, 1)
@@ -743,7 +880,7 @@ love.draw = function()
     -- top area (indicating notes can't be placed before the song)
     gfx.setColor(0, 0, 0, 0.25)
 
-    local coverHeight = gridCellSize * (gfx.getHeight() / 180)
+    local coverHeight = gridCellSize * (gfx.getHeight() / 120)
     gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) - coverHeight - 1, gridImage:getWidth(), coverHeight)
     gfx.rectangle("fill", gridScrollX, (gridScrollYNoWrap + (gridCellSize * 4)) - 4, gridImage:getWidth(), 3)
 
@@ -794,16 +931,7 @@ love.wheelmoved = function(x, y)
     imgui.love.WheelMoved(x, y)
     if not imgui.love.GetWantCaptureMouse() then
         if conductor.music and not conductor.music:isPlaying() then
-            local time = conductor:getTimeAtBeat(conductor.curBeat - (y > 0 and 1 or -1))
-            time = math.clamp(time, 0.0, conductor.music:getDuration("seconds") * 1000.0)
-            
-            conductor.music:seek(time / 1000.0, "seconds")
-            conductor:setCurrentRawTime(time)
-            conductor:update(0)
-
-            for _, track in pairs(vocals) do
-                track:seek(time / 1000.0, "seconds")
-            end
+            skipBeats((y > 0) and -1 or 1)
         end
     end
 end
